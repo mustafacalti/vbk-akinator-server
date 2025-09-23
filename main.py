@@ -268,6 +268,8 @@ def update_session_stats(session_state: Dict, question_idx: int, question: Dict)
         session_state["asked_questions"] = []
     if "area_counts" not in session_state:
         session_state["area_counts"] = {area: 0 for area in CLASSES}
+    if "positive_answers" not in session_state:
+        session_state["positive_answers"] = 0  # Evet/Kesinlikle evet sayısı
 
     session_state["asked_questions"].append(question_idx)
     session_state["area_counts"][question["category"]] += 1
@@ -296,10 +298,14 @@ def should_finish(scores: Dict[str, float], asked: int) -> bool:
 
     return False
 
-def is_uncertain_result(scores: Dict[str, float]) -> bool:
+def is_uncertain_result(scores: Dict[str, float], session_state: Dict) -> bool:
     """Sonuç belirsiz mi kontrol et"""
     probs = softmax(scores)
     top = max(probs.values())
+
+    # Hiç pozitif cevap verilmediyse belirsiz
+    if session_state.get("positive_answers", 0) == 0:
+        return True
 
     # Eğer en yüksek skor çok düşükse belirsiz
     if top < UNCERTAINTY_THRESHOLD:
@@ -332,7 +338,8 @@ async def start():
         "scores": {c: 0.0 for c in CLASSES},
         "asked_questions": [],
         "area_counts": {area: 0 for area in CLASSES},
-        "current_question_idx": question_idx
+        "current_question_idx": question_idx,
+        "positive_answers": 0
     }
 
     # İlk soruyu istatistiklere ekle
@@ -359,6 +366,11 @@ async def answer(body: AnswerIn):
     current_question = QUESTION_POOL[current_q_idx]
 
     val = LIKERT[body.answer]
+
+    # Pozitif cevap sayacını güncelle
+    if body.answer in ["evet", "kesinlikle_evet"]:
+        st["positive_answers"] = st.get("positive_answers", 0) + 1
+
     for c in CLASSES:
         st["scores"][c] += current_question.get("w", {}).get(c, 0.0) * val
 
@@ -391,8 +403,8 @@ async def _finish(st: Dict) -> NextOut:
     probs = softmax(st["scores"])
     probs = {k: round(v, 4) for k, v in probs.items()}
 
-    # Belirsiz sonuç kontrolü
-    if is_uncertain_result(st["scores"]):
+    # Belirsiz sonuç kontrolü (session state de gönder)
+    if is_uncertain_result(st["scores"], st):
         return NextOut(
             done=True,
             prediction="Belirsiz",
