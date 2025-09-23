@@ -68,6 +68,8 @@ class NextOut(BaseModel):
 # --- Parametreler ---
 CONFIDENCE_THRESHOLD = 0.75
 MAX_QUESTIONS = 8  # Daha kısa quiz
+MIN_QUESTIONS = 3  # Minimum soru sayısı
+UNCERTAINTY_THRESHOLD = 0.4  # Bu değerin altında belirsiz sayılır
 
 # --- SORU HAVUZU ---
 # Her soru:
@@ -279,11 +281,30 @@ def softmax(scores: Dict[str, float]) -> Dict[str, float]:
 def should_finish(scores: Dict[str, float], asked: int) -> bool:
     probs = softmax(scores)
     top = max(probs.values())
+
+    # Minimum soru sayısına ulaşmadıysa devam et
+    if asked < MIN_QUESTIONS:
+        return False
+
+    # Yüksek güvenle tahmin yapabiliyorsa bitir
     if top >= CONFIDENCE_THRESHOLD:
         return True
+
+    # Maximum sorulara ulaştıysa bitir
     if asked >= MAX_QUESTIONS:
         return True
+
     return False
+
+def is_uncertain_result(scores: Dict[str, float]) -> bool:
+    """Sonuç belirsiz mi kontrol et"""
+    probs = softmax(scores)
+    top = max(probs.values())
+    return top < UNCERTAINTY_THRESHOLD
+
+@app.get("/")
+async def root():
+    return {"message": "YTU Akinator Backend is running!", "status": "healthy"}
 
 @app.get("/start", response_model=StartOut)
 async def start():
@@ -355,5 +376,14 @@ async def answer(body: AnswerIn):
 async def _finish(st: Dict) -> NextOut:
     probs = softmax(st["scores"])
     probs = {k: round(v, 4) for k, v in probs.items()}
+
+    # Belirsiz sonuç kontrolü
+    if is_uncertain_result(st["scores"]):
+        return NextOut(
+            done=True,
+            prediction="Belirsiz",
+            confidences=probs
+        )
+
     pred = max(probs, key=probs.get)
     return NextOut(done=True, prediction=pred, confidences=probs)
