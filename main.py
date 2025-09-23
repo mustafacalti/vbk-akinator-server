@@ -69,7 +69,7 @@ class NextOut(BaseModel):
 CONFIDENCE_THRESHOLD = 0.75
 MAX_QUESTIONS = 8  # Daha kısa quiz
 MIN_QUESTIONS = 3  # Minimum soru sayısı
-UNCERTAINTY_THRESHOLD = 0.4  # Bu değerin altında belirsiz sayılır
+UNCERTAINTY_THRESHOLD = 0.3  # Bu değerin altında belirsiz sayılır (30%)
 
 # --- SORU HAVUZU ---
 # Her soru:
@@ -300,7 +300,21 @@ def is_uncertain_result(scores: Dict[str, float]) -> bool:
     """Sonuç belirsiz mi kontrol et"""
     probs = softmax(scores)
     top = max(probs.values())
-    return top < UNCERTAINTY_THRESHOLD
+
+    # Eğer en yüksek skor çok düşükse belirsiz
+    if top < UNCERTAINTY_THRESHOLD:
+        return True
+
+    # Eğer tüm skorlar çok yakınsa (belirsiz durum)
+    score_values = list(probs.values())
+    max_score = max(score_values)
+    second_max = sorted(score_values, reverse=True)[1]
+
+    # En yüksek ile ikinci en yüksek arasındaki fark çok azsa belirsiz
+    if max_score - second_max < 0.05:  # %5 fark
+        return True
+
+    return False
 
 @app.get("/")
 async def root():
