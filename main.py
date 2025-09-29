@@ -5,6 +5,7 @@ from typing import Dict, List, Optional, Literal
 from uuid import uuid4
 import math
 import random
+from firebase_service import firebase_service
 
 app = FastAPI(title="YTU-Akinator-Server (Branching)")
 
@@ -50,6 +51,7 @@ def bucket_of(val: int) -> str:
 class AnswerIn(BaseModel):
     session_id: str
     answer: AnswerKey
+
 
 class StartOut(BaseModel):
     session_id: str
@@ -231,10 +233,24 @@ def get_random_starting_question() -> tuple[int, Dict]:
     idx = random.randint(0, len(QUESTION_POOL) - 1)
     return idx, QUESTION_POOL[idx]
 
+def get_weighted_starting_question(global_weights: Dict[str, float]) -> tuple[int, Dict]:
+    """Ağırlıklı başlangıç sorusu seç - az çıkan alanlara öncelik ver"""
+    # Her soruya ağırlık hesapla
+    weights = []
+    for i, question in enumerate(QUESTION_POOL):
+        category = question["category"]
+        weight = global_weights.get(category, 1.0)
+        weights.append(weight)
+
+    # Ağırlıklı rastgele seçim
+    selected_idx = random.choices(range(len(QUESTION_POOL)), weights=weights, k=1)[0]
+    return selected_idx, QUESTION_POOL[selected_idx]
+
 def get_next_question(session_state: Dict) -> Optional[tuple[int, Dict]]:
-    """Akıllı soru seçimi - çeşitliliği koruyarak"""
+    """Akıllı soru seçimi - global ağırlıklar + çeşitliliği koruyarak"""
     asked_questions = set(session_state.get("asked_questions", []))
     area_counts = session_state.get("area_counts", {area: 0 for area in CLASSES})
+    global_weights = session_state.get("global_area_weights", {area: 1.0 for area in CLASSES})
 
     # Henüz sorulmamış soruları filtrele
     available_questions = [
@@ -249,14 +265,21 @@ def get_next_question(session_state: Dict) -> Optional[tuple[int, Dict]]:
     min_area = min(area_counts, key=area_counts.get)
     min_count = area_counts[min_area]
 
-    # Ağırlıklı seçim: az sorulan alanlara öncelik ver
+    # Ağırlıklı seçim: az sorulan alanlara + global ağırlıklar
     weights = []
     for i, q in available_questions:
         category = q["category"]
         count = area_counts[category]
-        # En az sorulan alana 3x, diğerlerine 1x ağırlık
-        weight = 3.0 if count == min_count else 1.0
-        weights.append(weight)
+
+        # Temel ağırlık: en az sorulan alana 3x, diğerlerine 1x
+        base_weight = 3.0 if count == min_count else 1.0
+
+        # Global ağırlığı ekle
+        global_weight = global_weights.get(category, 1.0)
+
+        # Final ağırlık
+        final_weight = base_weight * global_weight
+        weights.append(final_weight)
 
     # Ağırlıklı rastgele seçim
     selected_idx = random.choices(range(len(available_questions)), weights=weights, k=1)[0]
@@ -324,14 +347,37 @@ def is_uncertain_result(scores: Dict[str, float], session_state: Dict) -> bool:
 
 @app.get("/")
 async def root():
-    return {"message": "YTU Akinator Backend is running!", "status": "healthy"}
+    # Firebase test
+    try:
+        from firebase_service import firebase_service
+        await firebase_service.save_game_result(
+            predicted_class="Test",
+            asked_questions=[1, 2, 3],
+            confidences={"Test": 1.0},
+            session_data={"positive_answers": 1}
+        )
+        firebase_status = "Firebase OK"
+    except Exception as e:
+        firebase_status = f"Firebase ERROR: {str(e)}"
+
+    return {
+        "message": "YTU Akinator Backend is running!",
+        "status": "healthy",
+        "firebase": firebase_status
+    }
 
 @app.get("/start", response_model=StartOut)
 async def start():
     sid = str(uuid4())
 
-    # Random başlangıç sorusu seç
-    question_idx, question = get_random_starting_question()
+    # Global ağırlıkları al
+    try:
+        global_weights = await firebase_service.calculate_balanced_area_weights()
+    except:
+        global_weights = {area: 1.0 for area in CLASSES}
+
+    # Ağırlıklı başlangıç sorusu seç
+    question_idx, question = get_weighted_starting_question(global_weights)
 
     SESSIONS[sid] = {
         "i": 0,  # kaç soru soruldu
@@ -339,7 +385,8 @@ async def start():
         "asked_questions": [],
         "area_counts": {area: 0 for area in CLASSES},
         "current_question_idx": question_idx,
-        "positive_answers": 0
+        "positive_answers": 0,
+        "global_area_weights": global_weights  # Global ağırlıkları kaydet
     }
 
     # İlk soruyu istatistiklere ekle
@@ -354,12 +401,15 @@ async def start():
 
 @app.post("/answer", response_model=NextOut)
 async def answer(body: AnswerIn):
+    print(f"🎮 ANSWER: {body.answer} for session {body.session_id}")
+
     if body.session_id not in SESSIONS:
         raise HTTPException(404, "session not found")
     if body.answer not in LIKERT:
         raise HTTPException(400, "invalid answer")
 
     st = SESSIONS[body.session_id]
+    print(f"📊 BEFORE: Asked={st['i']}, should_finish={should_finish(st['scores'], st['i'])}")
 
     # Mevcut sorunun skorunu güncelle
     current_q_idx = st["current_question_idx"]
@@ -378,7 +428,9 @@ async def answer(body: AnswerIn):
     st["i"] += 1
 
     # Bitirme kriteri?
+    print(f"📊 AFTER: Asked={st['i']}, should_finish={should_finish(st['scores'], st['i'])}")
     if should_finish(st["scores"], st["i"]):
+        print("🏁 GAME FINISHING!")
         return await _finish(st)
 
     # Sonraki soruyu akıllı seçim ile bul
@@ -400,16 +452,36 @@ async def answer(body: AnswerIn):
     )
 
 async def _finish(st: Dict) -> NextOut:
+    print("🎯 Game finished! Processing results...")
+
     probs = softmax(st["scores"])
     probs = {k: round(v, 4) for k, v in probs.items()}
 
     # Belirsiz sonuç kontrolü (session state de gönder)
     if is_uncertain_result(st["scores"], st):
-        return NextOut(
-            done=True,
-            prediction="Belirsiz",
-            confidences=probs
-        )
+        predicted_class = "Belirsiz"
+    else:
+        predicted_class = max(probs, key=probs.get)
 
-    pred = max(probs, key=probs.get)
-    return NextOut(done=True, prediction=pred, confidences=probs)
+    print(f"🎯 Final prediction: {predicted_class}")
+
+    # Oyun sonucunu Firebase'e kaydet
+    try:
+        print("🎯 Attempting to save to Firebase...")
+        await firebase_service.save_game_result(
+            predicted_class=predicted_class,
+            asked_questions=st.get("asked_questions", []),
+            confidences=probs,
+            session_data=st
+        )
+    except Exception as e:
+        print(f"❌ Firebase save failed: {e}")
+        import traceback
+        traceback.print_exc()
+        # Hata olsa da oyunu devam ettir
+
+    return NextOut(
+        done=True,
+        prediction=predicted_class,
+        confidences=probs
+    )
