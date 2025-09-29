@@ -347,23 +347,9 @@ def is_uncertain_result(scores: Dict[str, float], session_state: Dict) -> bool:
 
 @app.get("/")
 async def root():
-    # Firebase test
-    try:
-        from firebase_service import firebase_service
-        await firebase_service.save_game_result(
-            predicted_class="Test",
-            asked_questions=[1, 2, 3],
-            confidences={"Test": 1.0},
-            session_data={"positive_answers": 1}
-        )
-        firebase_status = "Firebase OK"
-    except Exception as e:
-        firebase_status = f"Firebase ERROR: {str(e)}"
-
     return {
         "message": "YTU Akinator Backend is running!",
-        "status": "healthy",
-        "firebase": firebase_status
+        "status": "healthy"
     }
 
 @app.get("/start", response_model=StartOut)
